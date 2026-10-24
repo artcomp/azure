@@ -30,7 +30,7 @@ on:
         default: false
 
 concurrency:
-  group: appi-${{ inputs.environment }}-${{ inputs.app_name }}
+  group: app-insights-${{ inputs.environment }}-${{ inputs.app_name }}
   cancel-in-progress: false
 
 jobs:
@@ -52,7 +52,7 @@ jobs:
 
       - name: Validar inputs, derivar nomes e proximo NNN
         id: names
-        uses: ./.gitea/actions/resolve-appi-names
+        uses: ./projects/app-insights/actions/resolve-appi-names
         with:
           app_name: ${{ inputs.app_name }}
           environment: ${{ inputs.environment }}
@@ -68,7 +68,7 @@ jobs:
           location: ${{ inputs.region }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           name: deploy-${{ steps.names.outputs.appi_name }}
-          template-file: infra/deploy.bicep
+          template-file: projects/app-insights/bicep/deploy.bicep
           parameters: '{"rgName": "${{ steps.names.outputs.rg_name }}", "location": "${{ inputs.region }}", "appiName": "${{ steps.names.outputs.appi_name }}", "logName": "${{ steps.names.outputs.log_name }}"}'
           masked-outputs: connectionString
 

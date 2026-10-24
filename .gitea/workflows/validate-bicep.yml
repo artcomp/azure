@@ -1,0 +1,33 @@
+name: Validar Bicep
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: artcomp/azure-cli-node:latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compilar todos os templates .bicep
+        run: |
+          set -euo pipefail
+          total=0
+          while IFS= read -r file; do
+            total=$((total + 1))
+            echo "::group::$file"
+            az bicep build --file "$file" --stdout > /dev/null
+            echo "::endgroup::"
+          done < <(find projects -type f -name '*.bicep' | sort)
+          if [ "$total" -eq 0 ]; then
+            echo "::notice::Nenhum arquivo .bicep encontrado em projects/"
+          fi
+          echo "OK: $total template(s) compilado(s) sem erros."
