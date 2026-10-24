@@ -1,4 +1,4 @@
-name: Deploy App Insights (Bicep)
+name: Deploy App Insights + Log Analytics (Bicep)
 
 on:
   workflow_dispatch:
@@ -39,6 +39,7 @@ jobs:
     outputs:
       rg_name: ${{ steps.names.outputs.rg_name }}
       appi_name: ${{ steps.counter.outputs.appi_name }}
+      log_name: ${{ steps.counter.outputs.log_name }}
     steps:
       - name: Validar inputs e derivar nomes
         id: names
@@ -67,14 +68,18 @@ jobs:
 
           rg_name="${ENVIRONMENT}-rg-${app_name}"
           appi_prefix="${ENVIRONMENT}-appi-${app_name}-${REGION}-"
+          log_prefix="${ENVIRONMENT}-log-${app_name}-${REGION}-"
 
           {
             echo "rg_name=$rg_name"
             echo "appi_prefix=$appi_prefix"
+            echo "log_prefix=$log_prefix"
             echo "app_name=$app_name"
           } >> "$GITHUB_OUTPUT"
 
-          echo "RG: $rg_name | Prefixo App Insights: $appi_prefix"
+          echo "RG: $rg_name"
+          echo "Prefixo App Insights: $appi_prefix"
+          echo "Prefixo Log Analytics: $log_prefix"
 
       - name: Login Azure (service principal)
         env:
@@ -115,22 +120,38 @@ jobs:
             echo "Resource Group '$RG_NAME' criado."
           fi
 
-      - name: Calcular proximo contador (max+1)
+      - name: Calcular proximo contador (max+1, NNN unico)
         id: counter
         env:
           RG_NAME: ${{ steps.names.outputs.rg_name }}
           APPI_PREFIX: ${{ steps.names.outputs.appi_prefix }}
+          LOG_PREFIX: ${{ steps.names.outputs.log_prefix }}
         run: |
           set -euo pipefail
-          existing="$(az resource list \
+
+          components="$(az resource list \
             --resource-group "$RG_NAME" \
             --resource-type "Microsoft.Insights/components" \
             --query "[].name" \
             --output tsv)"
 
+          workspaces="$(az resource list \
+            --resource-group "$RG_NAME" \
+            --resource-type "Microsoft.OperationalInsights/workspaces" \
+            --query "[].name" \
+            --output tsv)"
+
           max=0
-          for name in $existing; do
+          for name in $components; do
             if [[ "$name" =~ ^${APPI_PREFIX}([0-9]{3})$ ]]; then
+              n=$((10#${BASH_REMATCH[1]}))
+              if [ "$n" -gt "$max" ]; then
+                max=$n
+              fi
+            fi
+          done
+          for name in $workspaces; do
+            if [[ "$name" =~ ^${LOG_PREFIX}([0-9]{3})$ ]]; then
               n=$((10#${BASH_REMATCH[1]}))
               if [ "$n" -gt "$max" ]; then
                 max=$n
@@ -140,42 +161,63 @@ jobs:
 
           next=$((max + 1))
           if [ "$next" -gt 999 ]; then
-            echo "::error::Contador estourou 999 para o prefixo '$APPI_PREFIX'. Renomeie/limpe recursos antigos."
+            echo "::error::Contador estourou 999 para os prefixos '$APPI_PREFIX' / '$LOG_PREFIX'. Renomeie/limpe recursos antigos."
             exit 1
           fi
 
           appi_name="$(printf '%s%03d' "$APPI_PREFIX" "$next")"
-          echo "appi_name=$appi_name" >> "$GITHUB_OUTPUT"
-          echo "Proximo nome: $appi_name (max atual: $max)"
+          log_name="$(printf '%s%03d' "$LOG_PREFIX" "$next")"
+          {
+            echo "appi_name=$appi_name"
+            echo "log_name=$log_name"
+          } >> "$GITHUB_OUTPUT"
+          echo "NNN=$(printf '%03d' "$next") (max atual: $max)"
+          echo "  Log Analytics: $log_name"
+          echo "  App Insights:  $appi_name"
 
       - name: Gerar template Bicep
         run: |
           set -euo pipefail
           mkdir -p infra
           cat > infra/main.bicep <<'BICEP_EOF'
-          param name string
+          param appiName string
+          param logName string
           param location string
 
+          resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+            name: logName
+            location: location
+            properties: {
+              sku: {
+                name: 'PerGB2018'
+              }
+              retentionInDays: 30
+            }
+          }
+
           resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
-            name: name
+            name: appiName
             location: location
             kind: 'web'
             properties: {
               Application_Type: 'web'
+              WorkspaceResourceId: logAnalytics.id
             }
           }
 
-          output name string = appInsights.name
+          output appiName string = appInsights.name
+          output logName string = logAnalytics.name
           output connectionString string = appInsights.properties.ConnectionString
           BICEP_EOF
           echo "Template gerado:"
           cat infra/main.bicep
 
-      - name: Deploy App Insights via Bicep
+      - name: Deploy Log Analytics + App Insights (Bicep)
         id: deploy
         env:
           RG_NAME: ${{ steps.names.outputs.rg_name }}
           APPI_NAME: ${{ steps.counter.outputs.appi_name }}
+          LOG_NAME: ${{ steps.counter.outputs.log_name }}
           REGION: ${{ inputs.region }}
         run: |
           set -euo pipefail
@@ -183,27 +225,31 @@ jobs:
           az deployment group create \
             --resource-group "$RG_NAME" \
             --template-file infra/main.bicep \
-            --parameters name="$APPI_NAME" location="$REGION" \
+            --parameters appiName="$APPI_NAME" logName="$LOG_NAME" location="$REGION" \
             --name "appi-deploy-${APPI_NAME}" \
             --output none
-          echo "Deploy concluido: $APPI_NAME no RG $RG_NAME ($REGION)"
+          echo "Deploy concluido no RG $RG_NAME ($REGION):"
+          echo "  Log Analytics: $LOG_NAME"
+          echo "  App Insights:  $APPI_NAME"
 
       - name: Resumo
         if: always()
         env:
           RG_NAME: ${{ steps.names.outputs.rg_name }}
           APPI_NAME: ${{ steps.counter.outputs.appi_name }}
+          LOG_NAME: ${{ steps.counter.outputs.log_name }}
           REGION: ${{ inputs.region }}
           ENVIRONMENT: ${{ inputs.environment }}
         run: |
           set -uo pipefail
           {
-            echo "## Deploy App Insights"
+            echo "## Deploy Log Analytics + App Insights"
             echo ""
             echo "| Campo | Valor |"
             echo "| --- | --- |"
             echo "| Ambiente | ${ENVIRONMENT:-n/a} |"
             echo "| Regiao | ${REGION:-n/a} |"
             echo "| Resource Group | ${RG_NAME:-n/a} |"
+            echo "| Log Analytics | ${LOG_NAME:-n/a} |"
             echo "| App Insights | ${APPI_NAME:-n/a} |"
           } >> "$GITHUB_STEP_SUMMARY"
