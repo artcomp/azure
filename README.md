@@ -47,12 +47,12 @@ Por que uma imagem própria? As actions oficiais são **Node24** e internamente 
 
 ## Inputs
 
-| Input         | Tipo     | Opciones                             | Obrigatório |
-| ------------- | -------- | ------------------------------------ | ----------- |
-| `app_name`    | `string` | `a-z`, `0-9`, hífens (2–41 chars)    | Sim         |
-| `environment` | `choice` | `dev`, `homolog`, `prod`             | Sim         |
-| `region`      | `choice` | `eastus`, `eastus2`, `brazilsouth`   | Sim         |
-| `dry_run`     | `boolean`| `true` simula (what-if), `false` cria| Não (false) |
+| Input         | Tipo      | Opções                               | Obrigatório |
+| ------------- | --------- | ------------------------------------ | ----------- |
+| `app_name`    | `string`  | `a-z`, `0-9`, hífens (2–41 chars)    | Sim         |
+| `environment` | `choice`  | `dev`, `homolog`, `prod`             | Sim         |
+| `region`      | `choice`  | `eastus`, `eastus2`, `brazilsouth`   | Sim         |
+| `dry_run`     | `boolean` | `true` simula (what-if), `false` cria| Não (`false`) |
 
 > `app_name` é normalizado para **lowercase** antes de validar. Ex.: `MeuApp` → `meuapp`.
 
@@ -88,7 +88,7 @@ Opções de registro:
 | Registro                  | Como referenciar                              | Observação                                              |
 | ------------------------- | --------------------------------------------- | ------------------------------------------------------- |
 | Docker Hub (público)      | `artcomp/azure-cli-node:latest`               | Runner puxa anonimamente — mais simples                 |
-| Package registry do Gitea | `localhost:3000/<usuario>/azure-cli-node:latest` | Requer `docker login <host>` no **host** do runner   |
+| Package registry do Gitea | `<host-do-gitea>/<usuario>/azure-cli-node:latest` | Requer pacotes habilitados no Gitea e `docker login <host>` no **host** do runner |
 
 Se usar outra tag/registro, ajuste `jobs.deploy.container.image` no workflow.
 
@@ -127,10 +127,11 @@ Gerando o SP (com a role customizada da seção RBAC):
 az ad sp create-for-rbac \
   --name "sp-appi-deployer" \
   --role "App Insights Deployer" \
-  --scopes /subscriptions/<SUBSCRIPTION_ID>
+  --scopes /subscriptions/<SUBSCRIPTION_ID> \
+  --json-auth true
 ```
 
-> A saída do comando já vem em JSON compatível (`clientId`/`clientSecret`/`tenantId`). Cole como valor do secret `AZURE_CREDENTIALS`. Alternativamente, crie o client secret manualmente no Entra ID e monte o JSON.
+> `--json-auth true` já emite o JSON no formato do secret acima (compatível com `azure/login`). O nome antigo da flag, `--sdk-auth`, está deprecado. Se usar a saída padrão do comando (sem a flag), monte o JSON manualmente: `clientId` ← `appId`, `clientSecret` ← `password`, `tenantId` ← `tenant`.
 
 O service principal precisa das permissões mínimas descritas em [Permissões RBAC mínimas](#permissões-rbac-mínimas).
 
@@ -155,7 +156,7 @@ O workflow executa exatamente estas operações ARM:
 | --------------------------------- | ----------------------------------- | ---------------------------------------------------------------- |
 | Verificar existência do RG        | `resolve.sh` (`az group exists`)    | `Microsoft.Resources/resourceGroups/read`                        |
 | Listar recursos no RG (contador)  | `resolve.sh` (`az resource list`)   | `Microsoft.Resources/resourceGroups/resources/read`              |
-| Criar RG + deployment (sub scope) | `azure/bicep-deploy@v2`             | `Microsoft.Resources/resourceGroups/write` + `deployments/read` + `deployments/write` |
+| Criar RG + deployment (sub scope) | `azure/bicep-deploy@v2`             | `Microsoft.Resources/resourceGroups/write` + `Microsoft.Resources/deployments/read` + `Microsoft.Resources/deployments/write` |
 | Criar Log Analytics               | módulo Bicep                        | `Microsoft.OperationalInsights/workspaces/read` + `write`        |
 | Criar App Insights                | módulo Bicep                        | `Microsoft.Insights/components/read` + `write`                   |
 
