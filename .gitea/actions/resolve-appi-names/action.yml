@@ -1,0 +1,35 @@
+name: 'resolve-appi-names'
+description: 'Valida inputs, monta RG/prefixos e calcula o proximo contador NNN'
+
+inputs:
+  app_name:
+    description: 'Nome da aplicacao (a-z, 0-9, hifens; 2-41 chars)'
+    required: true
+  environment:
+    description: 'Ambiente (dev | homolog | prod)'
+    required: true
+  region:
+    description: 'Regiao Azure (eastus | eastus2 | brazilsouth)'
+    required: true
+
+outputs:
+  rg_name:
+    description: 'Nome do resource group'
+    value: ${{ steps.resolve.outputs.rg_name }}
+  appi_name:
+    description: 'Nome final do Application Insights'
+    value: ${{ steps.resolve.outputs.appi_name }}
+  log_name:
+    description: 'Nome final do Log Analytics Workspace'
+    value: ${{ steps.resolve.outputs.log_name }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        APP_NAME_RAW: ${{ inputs.app_name }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        REGION: ${{ inputs.region }}
+      run: bash "$GITHUB_ACTION_PATH/resolve.sh"

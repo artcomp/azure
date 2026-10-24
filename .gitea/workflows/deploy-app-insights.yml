@@ -23,6 +23,11 @@ on:
           - eastus
           - eastus2
           - brazilsouth
+      dry_run:
+        description: "Simular (what-if, sem alterar recursos)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: appi-${{ inputs.environment }}-${{ inputs.app_name }}
@@ -32,216 +37,53 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     container:
-      image: mcr.microsoft.com/azure-cli:latest
+      image: artcomp/azure-cli-node:latest
     defaults:
       run:
         shell: bash
-    outputs:
-      rg_name: ${{ steps.names.outputs.rg_name }}
-      appi_name: ${{ steps.counter.outputs.appi_name }}
-      log_name: ${{ steps.counter.outputs.log_name }}
     steps:
-      - name: Validar inputs e derivar nomes
-        id: names
-        env:
-          APP_NAME_RAW: ${{ inputs.app_name }}
-          ENVIRONMENT: ${{ inputs.environment }}
-          REGION: ${{ inputs.region }}
-        run: |
-          set -euo pipefail
-
-          # Normaliza para lowercase e valida formato
-          app_name="$(echo "$APP_NAME_RAW" | tr '[:upper:]' '[:lower:]')"
-          if ! [[ "$app_name" =~ ^[a-z0-9][a-z0-9-]{1,40}$ ]]; then
-            echo "::error::app_name invalido: '$APP_NAME_RAW'. Use apenas a-z, 0-9 e hifens (2-41 chars)."
-            exit 1
-          fi
-
-          case "$ENVIRONMENT" in
-            dev|homolog|prod) ;;
-            *) echo "::error::environment invalido: $ENVIRONMENT"; exit 1 ;;
-          esac
-          case "$REGION" in
-            eastus|eastus2|brazilsouth) ;;
-            *) echo "::error::region invalida: $REGION"; exit 1 ;;
-          esac
-
-          rg_name="${ENVIRONMENT}-rg-${app_name}"
-          appi_prefix="${ENVIRONMENT}-appi-${app_name}-${REGION}-"
-          log_prefix="${ENVIRONMENT}-log-${app_name}-${REGION}-"
-
-          {
-            echo "rg_name=$rg_name"
-            echo "appi_prefix=$appi_prefix"
-            echo "log_prefix=$log_prefix"
-            echo "app_name=$app_name"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "RG: $rg_name"
-          echo "Prefixo App Insights: $appi_prefix"
-          echo "Prefixo Log Analytics: $log_prefix"
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Login Azure (service principal)
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        run: |
-          set -euo pipefail
-          if [ -z "${AZURE_CLIENT_ID:-}" ] || [ -z "${AZURE_CLIENT_SECRET:-}" ] || \
-             [ -z "${AZURE_TENANT_ID:-}" ] || [ -z "${AZURE_SUBSCRIPTION_ID:-}" ]; then
-            echo "::error::Configure os secrets AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID e AZURE_SUBSCRIPTION_ID no repo Gitea."
-            exit 1
-          fi
-          az login --service-principal \
-            -u "$AZURE_CLIENT_ID" \
-            -p "$AZURE_CLIENT_SECRET" \
-            --tenant "$AZURE_TENANT_ID" \
-            --output none
-          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
-          echo "Logado. Subscription: $(az account show --query name -o tsv)"
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Garantir Resource Group
-        env:
-          RG_NAME: ${{ steps.names.outputs.rg_name }}
-          REGION: ${{ inputs.region }}
-        run: |
-          set -euo pipefail
-          exists="$(az group exists --name "$RG_NAME")"
-          if [ "$exists" = "true" ]; then
-            echo "Resource Group '$RG_NAME' ja existe. Nada a fazer."
-          else
-            echo "Resource Group '$RG_NAME' nao encontrado. Criando em $REGION..."
-            az group create \
-              --name "$RG_NAME" \
-              --location "$REGION" \
-              --output none
-            echo "Resource Group '$RG_NAME' criado."
-          fi
+      - name: Validar inputs, derivar nomes e proximo NNN
+        id: names
+        uses: ./.gitea/actions/resolve-appi-names
+        with:
+          app_name: ${{ inputs.app_name }}
+          environment: ${{ inputs.environment }}
+          region: ${{ inputs.region }}
 
-      - name: Calcular proximo contador (max+1, NNN unico)
-        id: counter
-        env:
-          RG_NAME: ${{ steps.names.outputs.rg_name }}
-          APPI_PREFIX: ${{ steps.names.outputs.appi_prefix }}
-          LOG_PREFIX: ${{ steps.names.outputs.log_prefix }}
-        run: |
-          set -euo pipefail
-
-          components="$(az resource list \
-            --resource-group "$RG_NAME" \
-            --resource-type "Microsoft.Insights/components" \
-            --query "[].name" \
-            --output tsv)"
-
-          workspaces="$(az resource list \
-            --resource-group "$RG_NAME" \
-            --resource-type "Microsoft.OperationalInsights/workspaces" \
-            --query "[].name" \
-            --output tsv)"
-
-          max=0
-          for name in $components; do
-            if [[ "$name" =~ ^${APPI_PREFIX}([0-9]{3})$ ]]; then
-              n=$((10#${BASH_REMATCH[1]}))
-              if [ "$n" -gt "$max" ]; then
-                max=$n
-              fi
-            fi
-          done
-          for name in $workspaces; do
-            if [[ "$name" =~ ^${LOG_PREFIX}([0-9]{3})$ ]]; then
-              n=$((10#${BASH_REMATCH[1]}))
-              if [ "$n" -gt "$max" ]; then
-                max=$n
-              fi
-            fi
-          done
-
-          next=$((max + 1))
-          if [ "$next" -gt 999 ]; then
-            echo "::error::Contador estourou 999 para os prefixos '$APPI_PREFIX' / '$LOG_PREFIX'. Renomeie/limpe recursos antigos."
-            exit 1
-          fi
-
-          appi_name="$(printf '%s%03d' "$APPI_PREFIX" "$next")"
-          log_name="$(printf '%s%03d' "$LOG_PREFIX" "$next")"
-          {
-            echo "appi_name=$appi_name"
-            echo "log_name=$log_name"
-          } >> "$GITHUB_OUTPUT"
-          echo "NNN=$(printf '%03d' "$next") (max atual: $max)"
-          echo "  Log Analytics: $log_name"
-          echo "  App Insights:  $appi_name"
-
-      - name: Gerar template Bicep
-        run: |
-          set -euo pipefail
-          mkdir -p infra
-          cat > infra/main.bicep <<'BICEP_EOF'
-          param appiName string
-          param logName string
-          param location string
-
-          resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
-            name: logName
-            location: location
-            properties: {
-              sku: {
-                name: 'PerGB2018'
-              }
-              retentionInDays: 30
-            }
-          }
-
-          resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
-            name: appiName
-            location: location
-            kind: 'web'
-            properties: {
-              Application_Type: 'web'
-              WorkspaceResourceId: logAnalytics.id
-            }
-          }
-
-          output appiName string = appInsights.name
-          output logName string = logAnalytics.name
-          output connectionString string = appInsights.properties.ConnectionString
-          BICEP_EOF
-          echo "Template gerado:"
-          cat infra/main.bicep
-
-      - name: Deploy Log Analytics + App Insights (Bicep)
+      - name: Deploy Bicep (subscription scope)
         id: deploy
-        env:
-          RG_NAME: ${{ steps.names.outputs.rg_name }}
-          APPI_NAME: ${{ steps.counter.outputs.appi_name }}
-          LOG_NAME: ${{ steps.counter.outputs.log_name }}
-          REGION: ${{ inputs.region }}
-        run: |
-          set -euo pipefail
-          az bicep install --output none
-          az deployment group create \
-            --resource-group "$RG_NAME" \
-            --template-file infra/main.bicep \
-            --parameters appiName="$APPI_NAME" logName="$LOG_NAME" location="$REGION" \
-            --name "appi-deploy-${APPI_NAME}" \
-            --output none
-          echo "Deploy concluido no RG $RG_NAME ($REGION):"
-          echo "  Log Analytics: $LOG_NAME"
-          echo "  App Insights:  $APPI_NAME"
+        uses: azure/bicep-deploy@v2
+        with:
+          type: deployment
+          operation: ${{ inputs.dry_run == 'true' && 'whatIf' || 'create' }}
+          scope: subscription
+          location: ${{ inputs.region }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          name: deploy-${{ steps.names.outputs.appi_name }}
+          template-file: infra/deploy.bicep
+          parameters: '{"rgName": "${{ steps.names.outputs.rg_name }}", "location": "${{ inputs.region }}", "appiName": "${{ steps.names.outputs.appi_name }}", "logName": "${{ steps.names.outputs.log_name }}"}'
+          masked-outputs: connectionString
 
       - name: Resumo
         if: always()
         env:
-          RG_NAME: ${{ steps.names.outputs.rg_name }}
-          APPI_NAME: ${{ steps.counter.outputs.appi_name }}
-          LOG_NAME: ${{ steps.counter.outputs.log_name }}
-          REGION: ${{ inputs.region }}
           ENVIRONMENT: ${{ inputs.environment }}
+          REGION: ${{ inputs.region }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RG_NAME: ${{ steps.names.outputs.rg_name }}
+          APPI_NAME: ${{ steps.names.outputs.appi_name }}
+          LOG_NAME: ${{ steps.names.outputs.log_name }}
         run: |
           set -uo pipefail
+          if [ "$DRY_RUN" = "true" ]; then modo="what-if (simulacao)"; else modo="create (real)"; fi
           {
             echo "## Deploy Log Analytics + App Insights"
             echo ""
@@ -249,6 +91,7 @@ jobs:
             echo "| --- | --- |"
             echo "| Ambiente | ${ENVIRONMENT:-n/a} |"
             echo "| Regiao | ${REGION:-n/a} |"
+            echo "| Modo | $modo |"
             echo "| Resource Group | ${RG_NAME:-n/a} |"
             echo "| Log Analytics | ${LOG_NAME:-n/a} |"
             echo "| App Insights | ${APPI_NAME:-n/a} |"
